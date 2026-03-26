@@ -3,8 +3,17 @@
 #include <vector>
 #include <cstring>
 #include <algorithm>
+#include <chrono>
+#include <thread>
 
 #include "../../shared/include/net_protocol.h"
+
+
+static uint64_t get_time_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()
+    ).count();
+}
 
 struct Client
 {
@@ -17,6 +26,10 @@ struct PlayerObject
     NetID netID;
     int16_t x;
     int16_t y;
+    uint32_t client_id;           // Client ID
+    uint32_t last_input_sequence; // Last received input sequence number
+    float aim_x;  // Mouse aim position
+    float aim_y;  // Mouse aim position
 };
 
 int main() {
@@ -31,12 +44,22 @@ int main() {
     std::vector<PlayerObject> player_objects;
     uint32_t next_netID = 1;
 
-    uint8_t read_buffer[1024];
+    uint8_t read_buffer[2048];
     char sender_address[128];
 
+    // Frame rate limiting (60 FPS)
+    const uint64_t FRAME_TIME_MS = 1000 / 60;  // ~16.67 ms per frame
+    auto frame_start = std::chrono::high_resolution_clock::now();
+
     while (true) {
-        int32_t bytes_read = net_socket_poll(socket, read_buffer, 1024, sender_address, 128);
-        if (bytes_read > 0) { // There is data
+        // Process all available packets
+        while (true) {
+            int32_t bytes_read = net_socket_poll(socket, read_buffer, 1024, sender_address, 128);
+            if (bytes_read <= 0)
+            {
+                break;  // No more packets available
+            }
+
             PacketType packet_type = (PacketType)read_buffer[0];
             HelloPacket* hello_packet = reinterpret_cast<HelloPacket*>(read_buffer);
 
@@ -66,7 +89,15 @@ int main() {
                     new_player_object.x = hello_packet->x;
                     new_player_object.y = hello_packet->y;
                     new_player_object.netID = next_netID;
+                    new_player_object.client_id = next_userID;
+                    new_player_object.last_input_sequence = 0;
                     player_objects.push_back(new_player_object);
+
+
+                    AssignIDPacket assign_packet;
+                    assign_packet.type = PacketType::ASSIGN_ID;
+                    assign_packet.client_id = next_userID;
+                    net_socket_send(socket, sender_address, (uint8_t*)&assign_packet, sizeof(AssignIDPacket));
 
                     SpawnPacket packet;
                     packet.type = PacketType::SPAWN;
@@ -102,10 +133,102 @@ int main() {
                 }
                 else
                 {
-                    // TODO: Handle client packet
                     std::cout << "[SERVER] Old connection from " << sender_address << std::endl;
                 }
             }
+            else if (packet_type == PacketType::INPUT)
+            {
+                if (bytes_read >= sizeof(InputPacket))
+                {
+                    InputPacket* input_packet = reinterpret_cast<InputPacket*>(read_buffer);
+
+                    auto player_it = std::find_if(player_objects.begin(), player_objects.end(),
+                        [&](const PlayerObject& p) { return p.client_id == input_packet->client_id; });
+
+                    if (player_it != player_objects.end())
+                    {
+                        for (int i = 19; i >= 0; --i)
+                        {
+                            InputFrame& frame = input_packet->input_history[i];
+
+                            if (frame.sequence > player_it->last_input_sequence)
+                            {
+                                player_it->last_input_sequence = frame.sequence;
+
+                                player_it->aim_x = frame.aim_x;
+                                player_it->aim_y = frame.aim_y;
+
+                                uint8_t keys = frame.keys;
+                                int16_t old_x = player_it->x;
+                                int16_t old_y = player_it->y;
+
+                                const int16_t MOVE_SPEED = 5;
+
+                                if (keys & (1 << 0)) player_it->y -= MOVE_SPEED;
+                                if (keys & (1 << 1)) player_it->y += MOVE_SPEED;
+                                if (keys & (1 << 2)) player_it->x -= MOVE_SPEED;
+                                if (keys & (1 << 3)) player_it->x += MOVE_SPEED;
+
+                                bool position_changed = (player_it->x != old_x || player_it->y != old_y);
+
+                                std::cout << "[SERVER] Client " << input_packet->client_id
+                                          << " - Sequence: " << frame.sequence
+                                          << " Keys: " << (int)keys
+                                          << " Aim: (" << frame.aim_x << ", " << frame.aim_y << ")"
+                                          << " Pos: (" << player_it->x << ", " << player_it->y << ")" << std::endl;
+
+                                if (position_changed)
+                                {
+                                    PositionUpdatePacket pos_update;
+                                    pos_update.type = PacketType::POSITION_UPDATE;
+                                    pos_update.netID = player_it->netID;
+                                    pos_update.x = player_it->x;
+                                    pos_update.y = player_it->y;
+                                    pos_update.aim_x = player_it->aim_x;
+                                    pos_update.aim_y = player_it->aim_y;
+
+                                    for (const auto& client : clients)
+                                    {
+                                        net_socket_send(socket, client.address, (uint8_t*)&pos_update, sizeof(PositionUpdatePacket));
+                                    }
+
+                                    std::cout << "[SERVER] Sent position update for NetID " << player_it->netID
+                                              << " to all clients: (" << player_it->x << ", " << player_it->y << ")" << std::endl;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            else if (packet_type == PacketType::PING)
+            {
+                if (bytes_read >= sizeof(PingRequest))
+                {
+                    PingRequest* ping_req = reinterpret_cast<PingRequest*>(read_buffer);
+
+                    PingResponse pong;
+                    pong.type = PacketType::PONG;
+                    pong.ping_id = ping_req->ping_id;
+                    pong.t0 = ping_req->t0;
+                    pong.t1 = get_time_ms();
+
+                    net_socket_send(socket, sender_address, (uint8_t*)&pong, sizeof(PingResponse));
+
+                    std::cout << "[SERVER] Ping #" << ping_req->ping_id << " received from " << sender_address
+                              << " - Responding with server timestamp" << std::endl;
+                }
+            }
+        }
+
+        // Frame rate limiting (60 FPS)
+        auto current_time = std::chrono::high_resolution_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - frame_start).count();
+
+        if (elapsed < FRAME_TIME_MS) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(FRAME_TIME_MS - elapsed));
+            frame_start = std::chrono::high_resolution_clock::now();
+        } else {
+            frame_start = current_time;
         }
     }
 
