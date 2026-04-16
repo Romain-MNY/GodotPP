@@ -63,6 +63,7 @@ struct AssignIDPacket
 {
     PacketType type;    // 8 bits
     uint32_t client_id; // 32 bits
+    NetID net_id;       // 32 bits - The network object ID for this client
 };
 #pragma pack(pop)
 
@@ -90,6 +91,7 @@ struct PositionUpdatePacket
 {
     PacketType type;  // POSITION_UPDATE = 7
     NetID netID;
+    uint32_t sequence;
     int16_t x;
     int16_t y;
     float aim_x;

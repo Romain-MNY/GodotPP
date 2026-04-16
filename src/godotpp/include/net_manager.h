@@ -7,6 +7,10 @@
 
 #include <godot_cpp/classes/node.hpp>
 #include <godot_cpp/classes/packed_scene.hpp>
+#include <godot_cpp/classes/label.hpp>
+
+#include <deque>
+#include <map>
 
 namespace godot {
     class NetworkManager : public Node {
@@ -29,8 +33,31 @@ namespace godot {
         double ping_interval = 1.0;
         double time_since_last_ping = 0.0;
 
-        Vector2 predicted_position;
-        bool has_predicted_position = false;
+        uint32_t local_net_id = 0; // The NetID of the local player
+
+
+        struct PositionSnapshot {
+            uint32_t sequence;
+            int16_t x, y;
+            float aim_x, aim_y;
+            uint64_t timestamp;
+        };
+
+        std::map<NetID, std::deque<PositionSnapshot>> position_history;
+
+        struct InterpolationState {
+            Vector2 start_pos;
+            Vector2 target_pos;
+            uint64_t start_time;
+            uint64_t duration = 100; // ms
+            bool active = false;
+        };
+
+        std::map<NetID, InterpolationState> interp_states;
+
+        std::deque<uint64_t> latencies;
+        uint64_t average_rtt = 0;
+        const int MAX_LATENCIES = 10;
 
     public:
         NetworkManager();
@@ -39,6 +66,8 @@ namespace godot {
         void _ready() override;
 
         void _process(double delta) override;
+
+        void _physics_process(double delta) override;
 
         void send_input_packet();
         void update_input_state();

@@ -39,16 +39,18 @@ int main() {
     std::cout << "Listening to port 5000" << std::endl;
 
     std::vector<Client> clients;
-    uint32_t next_userID = 100;
+    uint32_t next_userID = 101;
 
     std::vector<PlayerObject> player_objects;
-    uint32_t next_netID = 1;
+    uint32_t next_netID = 101;
+
+    uint32_t position_update_sequence = 0;
 
     uint8_t read_buffer[2048];
     char sender_address[128];
 
-    // Frame rate limiting (60 FPS)
-    const uint64_t FRAME_TIME_MS = 1000 / 60;  // ~16.67 ms per frame
+    // Frame rate limiting (** FPS)
+    const uint64_t FRAME_TIME_MS = 1000 / 30;  //
     auto frame_start = std::chrono::high_resolution_clock::now();
 
     while (true) {
@@ -57,7 +59,7 @@ int main() {
             int32_t bytes_read = net_socket_poll(socket, read_buffer, 1024, sender_address, 128);
             if (bytes_read <= 0)
             {
-                break;  // No more packets available
+                break;
             }
 
             PacketType packet_type = (PacketType)read_buffer[0];
@@ -97,6 +99,7 @@ int main() {
                     AssignIDPacket assign_packet;
                     assign_packet.type = PacketType::ASSIGN_ID;
                     assign_packet.client_id = next_userID;
+                    assign_packet.net_id = next_netID;
                     net_socket_send(socket, sender_address, (uint8_t*)&assign_packet, sizeof(AssignIDPacket));
 
                     SpawnPacket packet;
@@ -147,6 +150,8 @@ int main() {
 
                     if (player_it != player_objects.end())
                     {
+                        bool position_changed = false;
+
                         for (int i = 19; i >= 0; --i)
                         {
                             InputFrame& frame = input_packet->input_history[i];
@@ -169,32 +174,27 @@ int main() {
                                 if (keys & (1 << 2)) player_it->x -= MOVE_SPEED;
                                 if (keys & (1 << 3)) player_it->x += MOVE_SPEED;
 
-                                bool position_changed = (player_it->x != old_x || player_it->y != old_y);
-
-                                std::cout << "[SERVER] Client " << input_packet->client_id
-                                          << " - Sequence: " << frame.sequence
-                                          << " Keys: " << (int)keys
-                                          << " Aim: (" << frame.aim_x << ", " << frame.aim_y << ")"
-                                          << " Pos: (" << player_it->x << ", " << player_it->y << ")" << std::endl;
-
-                                if (position_changed)
-                                {
-                                    PositionUpdatePacket pos_update;
-                                    pos_update.type = PacketType::POSITION_UPDATE;
-                                    pos_update.netID = player_it->netID;
-                                    pos_update.x = player_it->x;
-                                    pos_update.y = player_it->y;
-                                    pos_update.aim_x = player_it->aim_x;
-                                    pos_update.aim_y = player_it->aim_y;
-
-                                    for (const auto& client : clients)
-                                    {
-                                        net_socket_send(socket, client.address, (uint8_t*)&pos_update, sizeof(PositionUpdatePacket));
-                                    }
-
-                                    std::cout << "[SERVER] Sent position update for NetID " << player_it->netID
-                                              << " to all clients: (" << player_it->x << ", " << player_it->y << ")" << std::endl;
+                                if (player_it->x != old_x || player_it->y != old_y) {
+                                    position_changed = true;
                                 }
+                            }
+                        }
+
+                        // Send ONE position update per input packet (not per frame)
+                        if (position_changed)
+                        {
+                            PositionUpdatePacket pos_update;
+                            pos_update.type = PacketType::POSITION_UPDATE;
+                            pos_update.netID = player_it->netID;
+                            pos_update.sequence = position_update_sequence++;
+                            pos_update.x = player_it->x;
+                            pos_update.y = player_it->y;
+                            pos_update.aim_x = player_it->aim_x;
+                            pos_update.aim_y = player_it->aim_y;
+
+                            for (const auto& client : clients)
+                            {
+                                net_socket_send(socket, client.address, (uint8_t*)&pos_update, sizeof(PositionUpdatePacket));
                             }
                         }
                     }
