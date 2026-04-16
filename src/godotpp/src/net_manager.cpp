@@ -115,10 +115,8 @@ void godot::NetworkManager::_process(double delta)
                     if (node_2d)
                     {
                         Vector2 server_pos = Vector2(pos_update->x, pos_update->y);
-                        UtilityFunctions::print("[CLIENT] Received position update for NetID ", pos_update->netID, ", local_net_id is ", local_net_id);
                         if (pos_update->netID == local_net_id) {
                             node_2d->set_position(server_pos);
-                            UtilityFunctions::print("[CLIENT] Local player moved to: (", pos_update->x, ", ", pos_update->y, ")");
                         } else {
                             PositionSnapshot snapshot;
                             snapshot.sequence = pos_update->sequence;
