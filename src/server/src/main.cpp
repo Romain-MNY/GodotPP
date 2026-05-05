@@ -32,6 +32,12 @@ struct PlayerObject
     float aim_y;  // Mouse aim position
 };
 
+struct PendingInput {
+    InputPacket packet;
+    uint64_t receive_time;
+    char sender_address[128];
+};
+
 int main() {
     std::cout << "Init server" << std::endl;
 
@@ -42,6 +48,7 @@ int main() {
     uint32_t next_userID = 101;
 
     std::vector<PlayerObject> player_objects;
+    std::vector<PendingInput> pending_inputs;
     uint32_t next_netID = 101;
 
     uint32_t position_update_sequence = 0;
@@ -50,7 +57,8 @@ int main() {
     char sender_address[128];
 
     // Frame rate limiting (** FPS)
-    const uint64_t FRAME_TIME_MS = 1000 / 30;  //
+    const uint64_t FRAME_TIME_MS = 1000 / 30;
+    const uint64_t INPUT_DELAY_MS = 100;  // Delay for input
     auto frame_start = std::chrono::high_resolution_clock::now();
 
     while (true) {
@@ -143,61 +151,11 @@ int main() {
             {
                 if (bytes_read >= sizeof(InputPacket))
                 {
-                    InputPacket* input_packet = reinterpret_cast<InputPacket*>(read_buffer);
-
-                    auto player_it = std::find_if(player_objects.begin(), player_objects.end(),
-                        [&](const PlayerObject& p) { return p.client_id == input_packet->client_id; });
-
-                    if (player_it != player_objects.end())
-                    {
-                        bool position_changed = false;
-
-                        for (int i = 19; i >= 0; --i)
-                        {
-                            InputFrame& frame = input_packet->input_history[i];
-
-                            if (frame.sequence > player_it->last_input_sequence)
-                            {
-                                player_it->last_input_sequence = frame.sequence;
-
-                                player_it->aim_x = frame.aim_x;
-                                player_it->aim_y = frame.aim_y;
-
-                                uint8_t keys = frame.keys;
-                                int16_t old_x = player_it->x;
-                                int16_t old_y = player_it->y;
-
-                                const int16_t MOVE_SPEED = 5;
-
-                                if (keys & (1 << 0)) player_it->y -= MOVE_SPEED;
-                                if (keys & (1 << 1)) player_it->y += MOVE_SPEED;
-                                if (keys & (1 << 2)) player_it->x -= MOVE_SPEED;
-                                if (keys & (1 << 3)) player_it->x += MOVE_SPEED;
-
-                                if (player_it->x != old_x || player_it->y != old_y) {
-                                    position_changed = true;
-                                }
-                            }
-                        }
-
-                        // Send ONE position update per input packet (not per frame)
-                        if (position_changed)
-                        {
-                            PositionUpdatePacket pos_update;
-                            pos_update.type = PacketType::POSITION_UPDATE;
-                            pos_update.netID = player_it->netID;
-                            pos_update.sequence = position_update_sequence++;
-                            pos_update.x = player_it->x;
-                            pos_update.y = player_it->y;
-                            pos_update.aim_x = player_it->aim_x;
-                            pos_update.aim_y = player_it->aim_y;
-
-                            for (const auto& client : clients)
-                            {
-                                net_socket_send(socket, client.address, (uint8_t*)&pos_update, sizeof(PositionUpdatePacket));
-                            }
-                        }
-                    }
+                    PendingInput pi;
+                    memcpy(&pi.packet, read_buffer, sizeof(InputPacket));
+                    pi.receive_time = get_time_ms();
+                    memcpy(pi.sender_address, sender_address, 128);
+                    pending_inputs.push_back(pi);
                 }
             }
             else if (packet_type == PacketType::PING)
@@ -217,6 +175,65 @@ int main() {
                     std::cout << "[SERVER] Ping #" << ping_req->ping_id << " received from " << sender_address
                               << " - Responding with server timestamp" << std::endl;
                 }
+            }
+        }
+
+        uint64_t curr_time_ms = get_time_ms();
+        for (auto it = pending_inputs.begin(); it != pending_inputs.end(); ) {
+            if (curr_time_ms - it->receive_time >= INPUT_DELAY_MS) {
+                InputPacket* input_packet = &it->packet;
+
+                auto player_it = std::find_if(player_objects.begin(), player_objects.end(),
+                    [&](const PlayerObject& p) { return p.client_id == input_packet->client_id; });
+
+                if (player_it != player_objects.end()) {
+                    bool position_changed = false;
+
+                    for (int i = 19; i >= 0; --i) {
+                        InputFrame& frame = input_packet->input_history[i];
+
+                        if (frame.sequence > player_it->last_input_sequence) {
+                            player_it->last_input_sequence = frame.sequence;
+
+                            player_it->aim_x = frame.aim_x;
+                            player_it->aim_y = frame.aim_y;
+
+                            uint8_t keys = frame.keys;
+                            int16_t old_x = player_it->x;
+                            int16_t old_y = player_it->y;
+
+                            const int16_t MOVE_SPEED = 5;
+
+                            if (keys & (1 << 0)) player_it->y -= MOVE_SPEED;
+                            if (keys & (1 << 1)) player_it->y += MOVE_SPEED;
+                            if (keys & (1 << 2)) player_it->x -= MOVE_SPEED;
+                            if (keys & (1 << 3)) player_it->x += MOVE_SPEED;
+
+                            if (player_it->x != old_x || player_it->y != old_y) {
+                                position_changed = true;
+                            }
+                        }
+                    }
+
+                    if (position_changed) {
+                        PositionUpdatePacket pos_update;
+                        pos_update.type = PacketType::POSITION_UPDATE;
+                        pos_update.netID = player_it->netID;
+                        pos_update.sequence = position_update_sequence++;
+                        pos_update.x = player_it->x;
+                        pos_update.y = player_it->y;
+                        pos_update.aim_x = player_it->aim_x;
+                        pos_update.aim_y = player_it->aim_y;
+
+                        for (const auto& client : clients) {
+                            net_socket_send(socket, client.address, (uint8_t*)&pos_update, sizeof(PositionUpdatePacket));
+                        }
+                    }
+                }
+
+                it = pending_inputs.erase(it);
+            } else {
+                ++it;
             }
         }
 
