@@ -4,6 +4,7 @@
 #include <cstring>
 #include <algorithm>
 #include <chrono>
+#include <deque>
 #include <thread>
 
 #include "../../shared/include/net_protocol.h"
@@ -57,8 +58,8 @@ int main() {
     char sender_address[128];
 
     // Frame rate limiting (** FPS)
-    const uint64_t FRAME_TIME_MS = 1000 / 30;
-    const uint64_t INPUT_DELAY_MS = 100;  // Delay for input
+    const uint64_t FRAME_TIME_MS = 1000 / 60;
+    const uint64_t INPUT_DELAY_MS = 0;  // Delay for input
     auto frame_start = std::chrono::high_resolution_clock::now();
 
     while (true) {
@@ -206,8 +207,16 @@ int main() {
 
                             if (keys & (1 << 0)) player_it->y -= MOVE_SPEED;
                             if (keys & (1 << 1)) player_it->y += MOVE_SPEED;
-                            if (keys & (1 << 2)) player_it->x -= MOVE_SPEED;
-                            if (keys & (1 << 3)) player_it->x += MOVE_SPEED;
+                            if (keys & (1 << 2))
+                            {
+                                player_it->x -= MOVE_SPEED;
+                                //player_it->y -= 1.0f; erreur artificiel
+                            }
+                            if (keys & (1 << 3))
+                                {
+                                player_it->x += MOVE_SPEED;
+                                //player_it->y -= 1.0f; erreur artificiel
+                            }
 
                             if (player_it->x != old_x || player_it->y != old_y) {
                                 position_changed = true;

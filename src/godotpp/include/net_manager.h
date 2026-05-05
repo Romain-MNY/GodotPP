@@ -59,6 +59,21 @@ namespace godot {
         uint64_t average_rtt = 0;
         const int MAX_LATENCIES = 10;
 
+        struct LocalPositionSnapshot {
+            uint32_t sequence;
+            float x, y;
+        };
+
+        std::deque<LocalPositionSnapshot> local_position_history;
+
+        struct CorrectionState {
+            Vector2 target;
+            Vector2 velocity;
+            bool active = false;
+        };
+
+        CorrectionState correction_state;
+
     public:
         NetworkManager();
         ~NetworkManager();

@@ -116,7 +116,21 @@ void godot::NetworkManager::_process(double delta)
                     {
                         Vector2 server_pos = Vector2(pos_update->x, pos_update->y);
                         if (pos_update->netID == local_net_id) {
-                            node_2d->set_position(server_pos);
+                            // Find the local position at this sequence
+                            auto it = std::find_if(local_position_history.begin(), local_position_history.end(),
+                                [&](const LocalPositionSnapshot& s) { return s.sequence == pos_update->sequence; });
+                            if (it != local_position_history.end()) {
+                                Vector2 local_pos_at_time(it->x, it->y);
+                                Vector2 current_pos = node_2d->get_position();
+                                Vector2 correction = server_pos - local_pos_at_time;
+                                Vector2 target_pos = current_pos + correction;
+                                correction_state.target = target_pos;
+                                correction_state.velocity = Vector2(0, 0);
+                                correction_state.active = true;
+                            } else {
+                                // If not found, just set to server pos
+                                node_2d->set_position(server_pos);
+                            }
                         } else {
                             PositionSnapshot snapshot;
                             snapshot.sequence = pos_update->sequence;
@@ -204,6 +218,35 @@ void godot::NetworkManager::_process(double delta)
     if (rtt_label) {
         rtt_label->set_text(String("RTT: ") + String::num(average_rtt) + " ms");
     }
+
+    // Correction
+    if (correction_state.active) {
+        Node* local_node = linking_context.get_node(local_net_id);
+        if (local_node) {
+            Node2D* local_2d = dynamic_cast<Node2D*>(local_node);
+            if (local_2d) {
+                Vector2 pos = local_2d->get_position();
+                const float k = 800.0f;
+                const float damping = 30.0f;
+                Vector2 diff = correction_state.target - pos;
+
+                // Teleport
+                if (diff.length() > 200.0f) {
+                    local_2d->set_position(correction_state.target);
+                    correction_state.active = false;
+                    UtilityFunctions::print("[CLIENT] Position divergence too large (", diff.length(), "px), teleporting to server position");
+                } else {
+                    correction_state.velocity += diff * k * delta;
+                    correction_state.velocity *= damping;
+                    pos += correction_state.velocity * delta;
+                    local_2d->set_position(pos);
+                    if (diff.length() < 0.1f && correction_state.velocity.length() < 0.1f) {
+                        correction_state.active = false;
+                    }
+                }
+            }
+        }
+    }
 }
 
 void godot::NetworkManager::_physics_process(double delta)
@@ -212,13 +255,41 @@ void godot::NetworkManager::_physics_process(double delta)
 
     update_input_state();
     send_input_packet();
+
+    // Local prediction movement
+    if (local_net_id != 0) {
+        Node* local_node = linking_context.get_node(local_net_id);
+        if (local_node) {
+            Node2D* local_2d = dynamic_cast<Node2D*>(local_node);
+            if (local_2d) {
+                // Move based on current input
+                uint8_t keys = input_history[0].keys;
+                Vector2 pos = local_2d->get_position();
+                const float MOVE_SPEED = 5.0f;
+
+                if (keys & (1 << 0)) pos.y -= MOVE_SPEED;
+                if (keys & (1 << 1)) pos.y += MOVE_SPEED;
+                if (keys & (1 << 2)) pos.x -= MOVE_SPEED;
+                if (keys & (1 << 3)) pos.x += MOVE_SPEED;
+
+                local_2d->set_position(pos);
+
+                // Store in history
+                LocalPositionSnapshot snap;
+                snap.sequence = input_history[0].sequence;
+                snap.x = pos.x;
+                snap.y = pos.y;
+                local_position_history.push_back(snap);
+                if (local_position_history.size() > 50) local_position_history.pop_front();
+            }
+        }
+    }
 }
 
 void godot::NetworkManager::_bind_methods() {}
 
 void godot::NetworkManager::update_input_state()
 {
-    // Capture current input state
     Input* input = Input::get_singleton();
 
     uint8_t keys = 0;
@@ -228,16 +299,13 @@ void godot::NetworkManager::update_input_state()
     if (input->is_action_pressed("ui_right")) keys |= (1 << 3);   // bit3 = right
     if (input->is_action_pressed("ui_accept")) keys |= (1 << 4);  // bit4 = action
 
-    // Shift history to make room for new input
     for (int i = 19; i > 0; --i) {
         input_history[i] = input_history[i - 1];
     }
 
-    // Get mouse position for aiming
     Viewport* viewport = get_viewport();
     Vector2 mouse_pos = viewport->get_mouse_position();
 
-    // Add new input at the front
     input_history[0].sequence = input_sequence;
     input_history[0].keys = keys;
     input_history[0].aim_x = mouse_pos.x;
@@ -250,12 +318,10 @@ void godot::NetworkManager::send_input_packet()
 {
     if (!socket) return;
 
-    // Create and send input packet
     InputPacket packet;
     packet.type = PacketType::INPUT;
     packet.client_id = client_id;
 
-    // Copy input history
     std::memcpy(packet.input_history, input_history, sizeof(input_history));
 
     net_socket_send(socket, server_address, (uint8_t*)&packet, sizeof(InputPacket));
